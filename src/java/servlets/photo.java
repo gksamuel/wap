@@ -1,0 +1,209 @@
+/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package servlets;
+
+import entities.Filecategory;
+import entities.Files;
+import entities.Seekers;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.ResourceBundle;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.persistence.EntityManager;
+import javax.servlet.ServletException;
+import javax.servlet.annotation.WebServlet;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.transaction.HeuristicMixedException;
+import javax.transaction.HeuristicRollbackException;
+import javax.transaction.NotSupportedException;
+import javax.transaction.RollbackException;
+import javax.transaction.SystemException;
+import javax.transaction.UserTransaction;
+import org.apache.commons.fileupload.FileItem;
+import org.apache.commons.fileupload.disk.DiskFileItemFactory;
+import org.apache.commons.fileupload.servlet.ServletFileUpload;
+import utils.Db;
+
+/**
+ *
+ * @author gachanja
+ */
+@WebServlet(name = "photo", urlPatterns = {"/photo"})
+public class photo extends HttpServlet {
+
+    private boolean isMultipart;
+    private final String filePath = "/usr/local/apache2/htdocs/img/";
+    private final String quarantinePath = "/opt/quarantine/";
+
+    private final int maxFileSize = 3072000;
+    private final int maxMemSize = 2560000;
+    private File file;
+    private UserTransaction utx;
+    private EntityManager em;
+    private File newUploadFile;
+    private String name;
+    private Seekers seeker;
+    private Boolean virus = false;
+    private Boolean isImage = false;
+
+    /**
+     * Processes requests for both HTTP <code>GET</code> and <code>POST</code>
+     * methods.
+     *
+     * @param request servlet request
+     * @param response servlet response
+     * @throws ServletException if a servlet-specific error occurs
+     * @throws IOException if an I/O error occurs
+     */
+    protected void processRequest(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        response.setContentType("text/html;charset=UTF-8");
+        try (PrintWriter out = response.getWriter()) {
+
+            isMultipart = ServletFileUpload.isMultipartContent(request);
+
+            response.setContentType("text/html");
+            if (!isMultipart) {
+                return;
+            }
+
+            DiskFileItemFactory factory = new DiskFileItemFactory();
+            factory.setSizeThreshold(maxMemSize);
+            factory.setRepository(new File(filePath));
+
+            ServletFileUpload upload = new ServletFileUpload(factory);
+
+            upload.setSizeMax(maxFileSize);
+
+            try {
+                try {
+                    Db db = new Db(utx, em);
+                    utx = db.getUtx();
+                    em = db.getEm();
+                    utx.begin();
+                    List fileItems = upload.parseRequest(request);
+                    Iterator i = fileItems.iterator();
+                    while (i.hasNext()) {
+                        FileItem fi = (FileItem) i.next();
+                        if (!fi.isFormField()) {
+                            if (fi.getContentType().toLowerCase().contains(String.valueOf("image").toLowerCase())) {
+                                if (fi.getName().lastIndexOf("\\") >= 0) {
+                                    file = new File(filePath + fi.getName().substring(fi.getName().lastIndexOf("\\")));
+                                } else {
+                                    file = new File(filePath + fi.getName().substring(fi.getName().lastIndexOf("\\") + 1));
+                                }
+                                newUploadFile = new File(filePath + fi.getName());
+                                name = fi.getName();
+                                if (newUploadFile.exists()) {
+                                    Boolean fileExists = true;
+                                    String baseName = fi.getName().substring(0, fi.getName().lastIndexOf("."));
+                                    String extension = fi.getName().substring(fi.getName().lastIndexOf(".") + 1, fi.getName().length());
+                                    int fileCount = 0;
+                                    while (fileExists.compareTo(true) == 0) {
+                                        newUploadFile = new File(filePath + name);
+                                        if (newUploadFile.exists()) {
+                                            fileCount++;
+                                            name = baseName + "_" + fileCount + "." + extension;
+                                        } else {
+                                            fileExists = false;
+                                        }
+                                    }
+                                    if (fileCount >= 1) {
+                                        name = baseName + "_" + fileCount + "." + extension;
+                                    }
+                                }
+                                file = new File(quarantinePath + name);
+                                fi.write(file);
+                                try {
+                                    Process p = Runtime.getRuntime().exec(new String[]{"clamscan", quarantinePath + name});
+                                    p.waitFor();
+                                    BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                                    String line = reader.readLine();
+                                    if (line.substring((line.length() - 2), line.length()).compareTo("OK") == 0) {
+                                        p = Runtime.getRuntime().exec(new String[]{"convert", "-resize", "x150", quarantinePath + name, filePath + name});
+                                        p.waitFor();
+                                        p = Runtime.getRuntime().exec(new String[]{"rm", quarantinePath + name});
+                                        p.waitFor();
+                                        isImage = true;
+                                    } else {
+                                        p = Runtime.getRuntime().exec(new String[]{"rm", quarantinePath + name});
+                                        p.waitFor();
+                                        virus = true;
+
+                                    }
+                                } catch (IOException | InterruptedException e1) {
+
+                                }
+                            }
+                        } else if (fi.getFieldName().compareTo("id") == 0) {
+                            seeker = (Seekers) em.createNamedQuery("Seekers.findById").setParameter("id", Integer.valueOf(fi.getString())).getSingleResult();
+                        }
+                    }
+                    if (virus == false && isImage == true) {
+                        seeker.setPhoto(name);
+                        em.persist(seeker);
+                    }
+                    utx.commit();
+                    response.sendRedirect("/m/profile/photo.jsp");
+                } catch (NotSupportedException | SystemException | RollbackException | HeuristicMixedException | HeuristicRollbackException | SecurityException | IllegalStateException ex) {
+                    response.sendRedirect("/m/profile/photo.jsp");
+                }
+
+            } catch (Exception ex) {
+                response.sendRedirect("/m/profile/photo.jsp");
+            }
+        }
+    }
+
+// <editor-fold defaultstate="collapsed" desc="HttpServlet methods. Click on the + sign on the left to edit the code.">
+    /**
+     * Handles the HTTP <code>GET</code> method.
+     *
+     * @param request servlet request
+     * @param response servlet response
+     * @throws ServletException if a servlet-specific error occurs
+     * @throws IOException if an I/O error occurs
+     */
+    @Override
+    protected void doGet(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        processRequest(request, response);
+    }
+
+    /**
+     * Handles the HTTP <code>POST</code> method.
+     *
+     * @param request servlet request
+     * @param response servlet response
+     * @throws ServletException if a servlet-specific error occurs
+     * @throws IOException if an I/O error occurs
+     */
+    @Override
+    protected void doPost(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        processRequest(request, response);
+    }
+
+    /**
+     * Returns a short description of the servlet.
+     *
+     * @return a String containing servlet description
+     */
+    @Override
+    public String getServletInfo() {
+        return "Short description";
+    }// </editor-fold>
+
+}
